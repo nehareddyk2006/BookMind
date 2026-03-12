@@ -1,0 +1,212 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (matches auth.uid)
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - email: string (required, immutable)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - role: string (required, 'user' or 'admin')
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // Collection: books
+    // Document ID: auto-generated
+    // Fields:
+    //   - title: string (required)
+    //   - author: string (required)
+    //   - coverUrl: string (optional)
+    //   - description: string (optional)
+    //   - topics: list of strings (optional)
+    //   - available: boolean (required)
+    //   - aiSummary: string (optional)
+    //   - quotes: list of strings (optional)
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // Collection: borrowRecords
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (required, immutable)
+    //   - bookId: string (required, immutable)
+    //   - borrowedAt: timestamp (required, immutable)
+    //   - dueDate: timestamp (required)
+    //   - returnedAt: timestamp (optional)
+    //   - status: string (required, 'active', 'returned', 'overdue')
+    //
+    // Collection: notifications
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (required, immutable)
+    //   - title: string (required)
+    //   - message: string (required)
+    //   - type: string (required, 'due_date', 'reminder', etc)
+    //   - read: boolean (required)
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "nehareddy.mrecw@gmail.com" && request.auth.token.email_verified == true)); // Default admin
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+             request.resource.data[field] == null ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() >= minLen &&
+              request.resource.data[field].size() <= maxLen);
+    }
+
+    function isValidList(listField, maxSize, itemType) {
+      // Simplified check for list size
+      return !(listField in request.resource.data) ||
+             (request.resource.data[listField] is list && request.resource.data[listField].size() <= maxSize);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() > 0 && data.uid.size() < 100 &&
+             data.email is string && isValidEmail(data.email) &&
+             isValidOptionalString('displayName', 0, 100) &&
+             isValidOptionalString('photoURL', 0, 2000) &&
+             data.role in ['user', 'admin'];
+    }
+
+    function isValidBook(data) {
+      return hasOnlyAllowedFields(['title', 'author', 'coverUrl', 'description', 'topics', 'available', 'aiSummary', 'quotes', 'createdAt']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.author is string && data.author.size() > 0 && data.author.size() < 100 &&
+             isValidOptionalString('coverUrl', 1, 2000) &&
+             isValidOptionalString('description', 1, 5000) &&
+             isValidList('topics', 20, 'string') &&
+             data.available is bool &&
+             isValidOptionalString('aiSummary', 1, 5000) &&
+             isValidList('quotes', 50, 'string') &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidBorrowRecord(data) {
+      return hasOnlyAllowedFields(['userId', 'bookId', 'borrowedAt', 'dueDate', 'returnedAt', 'status']) &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.bookId is string && data.bookId.size() > 0 && data.bookId.size() < 100 &&
+             data.borrowedAt is timestamp &&
+             data.dueDate is timestamp &&
+             (!( 'returnedAt' in data ) || data.returnedAt is timestamp) &&
+             data.status in ['active', 'returned', 'overdue'];
+    }
+
+    function isValidNotification(data) {
+      return hasOnlyAllowedFields(['userId', 'title', 'message', 'type', 'read', 'createdAt']) &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.message is string && data.message.size() > 0 && data.message.size() < 1000 &&
+             data.type is string && data.type.size() > 0 && data.type.size() < 50 &&
+             data.read is bool &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && 
+                    isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    uidUnchanged();
+      allow update: if isAuthenticated() && 
+                    isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    uidNotModified() &&
+                    areImmutableFieldsUnchanged(['uid', 'email', 'createdAt']);
+      allow delete: if isAdmin();
+    }
+
+    match /books/{bookId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidBook(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    isValidBook(request.resource.data) && 
+                    areImmutableFieldsUnchanged(['createdAt']) &&
+                    // Users can only update availability when borrowing/returning
+                    (isAdmin() || 
+                     (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['available'])));
+      allow delete: if isAdmin();
+    }
+
+    match /borrowRecords/{recordId} {
+      allow read: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && 
+                    isOwner(request.resource.data.userId) && 
+                    isValidBorrowRecord(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    isOwner(resource.data.userId) && 
+                    isValidBorrowRecord(request.resource.data) &&
+                    areImmutableFieldsUnchanged(['userId', 'bookId', 'borrowedAt']) &&
+                    // Only allow status and returnedAt updates by user
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'returnedAt']);
+      allow delete: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.userId);
+      allow create: if isAdmin() && isValidNotification(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    isOwner(resource.data.userId) && 
+                    isValidNotification(request.resource.data) &&
+                    areImmutableFieldsUnchanged(['userId', 'title', 'message', 'type', 'createdAt']) &&
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if isAdmin() || isOwner(resource.data.userId);
+    }
+  }
+}
